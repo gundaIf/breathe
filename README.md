@@ -24,7 +24,7 @@ A single `TimelineView` drives the whole scene at 60fps.
 
 ## The look
 
-Monument Valley: flat pastel geometry, no glow and no blur anywhere. Depth comes only
+A flat pastel geometry, no glow and no blur anywhere. Depth comes only
 from pairing a light and a dark face across a crease, the way folded paper reads.
 
 - **An origami lotus** of three petal rings that open and close with the breath. Each
