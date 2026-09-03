@@ -5,8 +5,6 @@ A calm, native macOS breathing app. Six seconds in, six seconds out, through the
 Built with SwiftUI and drawn entirely in code — no image assets, no audio files, no
 dependencies. The whole app is about 1 MB.
 
-![Breathe across one full cycle](docs/preview.jpg)
-
 ## The breath
 
 One cycle is 12 seconds: a 6-second inhale and a 6-second exhale.
