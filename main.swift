@@ -3,10 +3,14 @@ import AppKit
 
 // Offscreen renderer: draws the scene at several points in the breath cycle
 // into one contact sheet, so the visuals can be reviewed without running the app.
+//
+// Usage: preview <out.png> [t1 t2 ...]   — times in seconds of breath time.
 
 MainActor.assumeIsolated {
     let W: CGFloat = 380, H: CGFloat = 540
-    let times: [Double] = [0, 1.5, 3.0, 4.5, 6.0, 9.0]
+    let args = CommandLine.arguments
+    let custom = args.dropFirst(2).compactMap(Double.init)
+    let times: [Double] = custom.isEmpty ? [0, 1.5, 3.0, 4.5, 6.0, 9.0] : Array(custom)
     let cols = 3
     let rows = (times.count + cols - 1) / cols
 
@@ -14,11 +18,7 @@ MainActor.assumeIsolated {
     sheet.lockFocus()
 
     for (i, t) in times.enumerated() {
-        let view = ZStack {
-            MonumentScene(elapsed: t, state: breathState(at: t))
-            Guidance(state: breathState(at: t), isRunning: true)
-        }
-        .frame(width: W, height: H)
+        let view = MonumentScene(elapsed: t).frame(width: W, height: H)
 
         let renderer = ImageRenderer(content: view)
         renderer.scale = 2
@@ -45,7 +45,7 @@ MainActor.assumeIsolated {
           let png = rep.representation(using: .png, properties: [:]) else {
         fatalError("encode failed")
     }
-    let out = CommandLine.arguments.count > 1 ? CommandLine.arguments[1] : "frames.png"
+    let out = args.count > 1 ? args[1] : "frames.png"
     try! png.write(to: URL(fileURLWithPath: out))
     print("wrote \(out)")
 }

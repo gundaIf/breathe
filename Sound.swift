@@ -1,34 +1,58 @@
 import AVFoundation
 import Foundation
 
-/// Mutable state owned by the audio render thread.
+/// State for the audio render thread.
 ///
-/// Everything here is touched only from inside the render block while the
-/// engine is running, or from the main thread while it is stopped — never both
-/// at once — so no locking is needed on the real-time path.
+/// `targetRate` and `muteTarget` are written from the main thread and read on
+/// the render thread. Each is a single aligned word, the conventional way to
+/// pass a control value into a real-time audio callback without taking a lock;
+/// the render side smooths whatever it reads, so a value landing a buffer late
+/// is inaudible. Everything else is touched only on the render thread, or on the
+/// main thread while the engine is stopped.
 final class AudioState: @unchecked Sendable {
-    var n: Double = 0            // sample counter
-    var fadeN: Double = 0        // samples since start, for the fade-in
+    var targetRate: Double = 1
+    var muteTarget: Double = 1
+
+    var n: Double = 0            // samples rendered: real time, drives pitch
+    var tb: Double = 0           // breath time: slows and stops with the glide
+    var glide = Glide(0)
+    var muteGain: Double = 1
+    var fadeN: Double = 0
     var lastPhaseIdx: Int = -1
-    var strikeT: Double = -1000  // when the bowl was last struck
+    var strikeT: Double = -1000  // real time of the last bowl strike
     var strikeF: Double = 392
-    var lp: Double = 0           // one-pole lowpass state for the air layer
+    var lp: Double = 0
     var rng: UInt64 = 0x9E3779B97F4A7C15
+
+    func reset() {
+        n = 0; tb = 0; glide = Glide(0)
+        fadeN = 0; lastPhaseIdx = -1; strikeT = -1000; lp = 0
+        muteGain = muteTarget
+    }
 }
 
 /// One sample of the soundscape, advancing `st` by a frame.
 ///
-/// Kept as a free function rather than buried in the render block so it can be
-/// rendered offline and measured — the audio is generated, so this is the only
-/// way to check it is actually producing sound and staying in range.
+/// Two clocks run here. Oscillators follow real time, so pitch never bends.
+/// The breath — the pad's swell and the bowl strikes — follows `tb`, which
+/// glides to a stop on pause along the same curve as the visuals.
+///
+/// A free function rather than a closure so it can be rendered offline and
+/// measured; the sound is generated, so that is the only way to check it.
 @inline(__always)
 func renderSoundscapeSample(st: AudioState, sampleRate sr: Double,
-                            cycle cyc: Double, root: Double) -> Double {
-    let t = st.n / sr
+                            cycle cyc: Double, root: Double,
+                            muteCoef: Double) -> Double {
+    let dt = 1 / sr
+    let t = st.n * dt
     st.n += 1
     st.fadeN += 1
 
-    let pos = t.truncatingRemainder(dividingBy: cyc)
+    st.tb += st.glide.step(dt, toward: st.targetRate)
+    let rate = max(0, min(1, st.glide.r))
+    st.muteGain += (st.muteTarget - st.muteGain) * muteCoef
+
+    let pos = st.tb.truncatingRemainder(dividingBy: cyc)
     let b = (1 - cos(2 * .pi * pos / cyc)) / 2      // same curve as the visuals
 
     // Strike the bowl whenever the breath turns.
@@ -40,9 +64,7 @@ func renderSoundscapeSample(st: AudioState, sampleRate sr: Double,
         st.strikeF = (idx == 0) ? 392.0 : 261.63
     }
 
-    // — Drone: a slow, low bed that never quite sits still. It lifts a little
-    //   with the breath too, so the whole bed moves rather than just the pad
-    //   riding over a flat floor.
+    // — Drone: a slow, low bed that lifts a little with the breath.
     let slow = sin(2 * .pi * 0.035 * t)
     let droneEnv = (0.86 + 0.14 * sin(2 * .pi * 0.05 * t)) * (0.80 + 0.20 * b)
     let drone = (0.070 * sin(2 * .pi * root * t)
@@ -75,8 +97,11 @@ func renderSoundscapeSample(st: AudioState, sampleRate sr: Double,
     st.lp += 0.02 * (white - st.lp)
     let air = st.lp * 0.030 * (0.35 + 0.65 * b)
 
+    // As the breath slows to rest the sound settles with it, then returns as
+    // the breath picks back up.
+    let presence = rate * rate * (3 - 2 * rate)
     let fade = min(1.0, st.fadeN / (sr * 2.5))
-    return tanh((drone + pad + bell + air) * 1.15) * 0.95 * fade
+    return tanh((drone + pad + bell + air) * 1.15) * 0.95 * fade * presence * st.muteGain
 }
 
 /// A generated zen soundscape, locked to the same 12-second breath as the
@@ -97,8 +122,6 @@ final class Soundscape {
 
     private init() {}
 
-    // MARK: Graph
-
     private func configure() {
         guard !configured else { return }
 
@@ -113,13 +136,14 @@ final class Soundscape {
         let sr = sampleRate
         let cyc = cycle
         let root = f0
+        let muteCoef = 1 - exp(-1 / (0.12 * sr))     // ~120 ms mute ramp
 
         let node = AVAudioSourceNode(format: fmt) { _, _, frameCount, ablPtr -> OSStatus in
             let abl = UnsafeMutableAudioBufferListPointer(ablPtr)
-
             for frame in 0..<Int(frameCount) {
                 let sample = Float(renderSoundscapeSample(st: st, sampleRate: sr,
-                                                          cycle: cyc, root: root))
+                                                          cycle: cyc, root: root,
+                                                          muteCoef: muteCoef))
                 for buffer in abl {
                     let p = UnsafeMutableBufferPointer<Float>(buffer)
                     if frame < p.count { p[frame] = sample }
@@ -133,35 +157,38 @@ final class Soundscape {
         configured = true
     }
 
-    // MARK: Transport
-
-    /// Starts (or resumes) the bed at a given point in the breath. The counters
-    /// are only rewound while the engine is stopped, so the render thread never
-    /// sees them change underneath it.
-    func start(atElapsed elapsed: Double) {
+    /// Starts the bed from rest. Like the visuals, it eases into motion.
+    func begin() {
         configure()
         guard configured else { return }
-
-        state.n = max(0, elapsed) * sampleRate
-        state.fadeN = 0
-        state.lp = 0
-        let pos = max(0, elapsed).truncatingRemainder(dividingBy: cycle)
-        state.lastPhaseIdx = pos < cycle / 2 ? 0 : 1   // avoid a stray strike on resume
-        state.strikeT = -1000
-
+        state.targetRate = 1
+        state.reset()
         engine.prepare()
         try? engine.start()
     }
 
-    func pause() {
+    /// Glides the breath to rest or back to motion. The engine keeps running
+    /// through the glide so the sound can settle rather than cut off.
+    func setRunning(_ running: Bool) {
+        guard configured else { return }
+        if running && !engine.isRunning { try? engine.start() }
+        state.targetRate = running ? 1 : 0
+    }
+
+    /// Once a pause has fully settled there is nothing left to hear, so stop
+    /// rendering. State is kept, and `setRunning(true)` picks up where it left.
+    func suspend() {
+        guard configured, state.targetRate == 0 else { return }
+        engine.pause()
+    }
+
+    func stop() {
         guard configured else { return }
         engine.pause()
     }
 
-    /// Mute rides the mixer's own volume, which AVAudioEngine ramps for us — so
-    /// it is click-free and safe to set from the main thread while rendering.
+    /// Mute is a gain ramp inside the render loop, so it never clicks.
     func setMuted(_ muted: Bool) {
-        configure()
-        engine.mainMixerNode.outputVolume = muted ? 0 : 1
+        state.muteTarget = muted ? 0 : 1
     }
 }
