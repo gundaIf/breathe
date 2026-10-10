@@ -5,13 +5,22 @@ cd "$(dirname "$0")"
 APP="build/Breathe.app"
 DMGSTAGE="build/dmg"
 DMG="build/Breathe.dmg"
+VERSION="1.1"
+MIN_MACOS="14.0"
+SOURCES=(App.swift Core.swift Clock.swift Sound.swift)
 
 echo "==> Cleaning"
 rm -rf "$APP" "$DMGSTAGE" "$DMG" build/Breathe.iconset build/icon.png build/AppIcon.icns
 
-echo "==> Compiling app"
-swiftc -O -parse-as-library -o build/Breathe App.swift Core.swift Sound.swift \
-    -framework SwiftUI -framework AppKit -framework AVFoundation
+# Without an explicit target, swiftc builds for the host's own macOS version
+# and architecture — a binary that refuses to open on anything older or Intel.
+echo "==> Compiling app (universal, macOS $MIN_MACOS+)"
+for ARCH in arm64 x86_64; do
+  swiftc -O -parse-as-library -target "$ARCH-apple-macos$MIN_MACOS" \
+      -o "build/Breathe-$ARCH" "${SOURCES[@]}" \
+      -framework SwiftUI -framework AppKit -framework AVFoundation
+done
+lipo -create -output build/Breathe build/Breathe-arm64 build/Breathe-x86_64
 
 echo "==> Rendering icon"
 swiftc -O -o build/makeicon makeicon.swift -framework AppKit
@@ -37,7 +46,7 @@ cp build/Breathe "$APP/Contents/MacOS/Breathe"
 cp build/AppIcon.icns "$APP/Contents/Resources/AppIcon.icns"
 chmod +x "$APP/Contents/MacOS/Breathe"
 
-cat > "$APP/Contents/Info.plist" <<'PLIST'
+cat > "$APP/Contents/Info.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
@@ -45,12 +54,12 @@ cat > "$APP/Contents/Info.plist" <<'PLIST'
     <key>CFBundleName</key><string>Breathe</string>
     <key>CFBundleDisplayName</key><string>Breathe</string>
     <key>CFBundleIdentifier</key><string>com.breathe.app</string>
-    <key>CFBundleVersion</key><string>1.0</string>
-    <key>CFBundleShortVersionString</key><string>1.0</string>
+    <key>CFBundleVersion</key><string>$VERSION</string>
+    <key>CFBundleShortVersionString</key><string>$VERSION</string>
     <key>CFBundlePackageType</key><string>APPL</string>
     <key>CFBundleExecutable</key><string>Breathe</string>
     <key>CFBundleIconFile</key><string>AppIcon</string>
-    <key>LSMinimumSystemVersion</key><string>13.0</string>
+    <key>LSMinimumSystemVersion</key><string>$MIN_MACOS</string>
     <key>NSHighResolutionCapable</key><true/>
     <key>NSPrincipalClass</key><string>NSApplication</string>
     <key>LSApplicationCategoryType</key><string>public.app-category.healthcare-fitness</string>
